@@ -1,0 +1,68 @@
+name: Bug report
+description: Report something that isn't working
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug.
+
+        Please do NOT include secrets (Discord bot token, Matrix access token, webhook token).
+
+  - type: input
+    id: version
+    attributes:
+      label: Bridge version
+      description: What git commit/tag are you on?
+      placeholder: "main @ <commit>"
+    validations:
+      required: false
+
+  - type: input
+    id: node
+    attributes:
+      label: Node.js version
+      placeholder: "node -v"
+    validations:
+      required: true
+
+  - type: input
+    id: homeserver
+    attributes:
+      label: Matrix homeserver
+      placeholder: "https://matrix.org"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (sanitized)
+      description: Paste relevant logs with tokens removed.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Config (sanitized)
+      description: Paste the structure (IDs are OK). Replace tokens with ***.
+      render: json
+    validations:
+      required: false
