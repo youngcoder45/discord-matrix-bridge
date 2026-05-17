@@ -1,0 +1,23 @@
+{
+  "discord": {
+    "botToken": "YOUR_DISCORD_BOT_TOKEN"
+  },
+  "matrix": {
+    "homeserverUrl": "https://matrix.org",
+    "accessToken": "YOUR_MATRIX_ACCESS_TOKEN",
+    "botUserId": "@yourbot:matrix.org"
+  },
+  "bridge": {
+    "statePath": "./data/state.json",
+    "matrixSyncPath": "./data/matrix-sync.json",
+    "forwardReactions": true,
+    "forwardEdits": true,
+    "mappings": [
+      {
+        "discordChannelId": "DISCORD_CHANNEL_ID",
+        "discordWebhookUrl": "ok",
+        "matrixRoomId": "!roomid:matrix.org"
+      }
+    ]
+  }
+}
