@@ -12,6 +12,7 @@ import {
   GatewayIntentBits,
   Partials,
   WebhookClient,
+  type GuildMember,
   type Message,
   type PartialMessage,
   type MessageReaction,
@@ -100,6 +101,8 @@ async function getMatrixDisplayName(matrix: MatrixClient, userId: string): Promi
   } catch {
     // ignore
   }
+  const localpart = userId.indexOf(":");
+  if (userId.startsWith("@") && localpart > 1) return userId.slice(1, localpart);
   return userId;
 }
 
@@ -108,6 +111,16 @@ async function getMatrixAvatarUrl(matrix: MatrixClient, userId: string): Promise
     const profile = await (matrix as any).getUserProfile(userId);
     const avatarMxc = profile?.avatar_url;
     if (typeof avatarMxc !== "string" || !avatarMxc.startsWith("mxc://")) return undefined;
+
+    // prefer a small thumbnail for the Discord webhook avatar
+    const thumbnail = (matrix as any).mxcToHttpThumbnail;
+    if (typeof thumbnail === "function") {
+      try {
+        return thumbnail.call(matrix, avatarMxc, 128, 128, "crop");
+      } catch {
+        // fall through to full size
+      }
+    }
 
     const fn = (matrix as any).mxcToHttp;
     if (typeof fn === "function") return fn.call(matrix, avatarMxc);
@@ -155,6 +168,75 @@ export async function startBridge(config: BridgeConfig, state: StateStore): Prom
 
   const matrixBotUserId = await resolveMatrixBotUserId(config, matrix);
 
+  // Discord -> Matrix profile mirroring. The bot has a single Matrix account, so we
+  // repoint its display name + avatar to the Discord sender right before each send,
+  // serialized through a queue so concurrent senders don't clobber each other.
+  const avatarMxcCache = new Map<string, string>();
+  let lastProfileName = "";
+  let lastProfileAvatarMxc = "";
+  let profileSyncQueue: Promise<string> = Promise.resolve("");
+
+  async function fetchAvatarMxc(avatarUrl: string): Promise<string | undefined> {
+    try {
+      const res = await fetch(avatarUrl);
+      if (!res.ok) return undefined;
+      const data = Buffer.from(await res.arrayBuffer());
+      const contentType = res.headers.get("content-type") ?? "image/png";
+      return await matrix.uploadContent(data, contentType, "avatar");
+    } catch {
+      return undefined;
+    }
+  }
+
+  async function sendAsDiscordUser(
+    roomId: string,
+    eventContent: any,
+    author: User,
+    member: GuildMember | null,
+  ): Promise<string> {
+    const displayName = member?.displayName ?? author.username;
+    const avatarUrl = author.displayAvatarURL({ extension: "png", size: 256 });
+
+    let avatarMxc: string | undefined = avatarMxcCache.get(avatarUrl);
+    if (!avatarMxc && avatarUrl) {
+      avatarMxc = await fetchAvatarMxc(avatarUrl);
+      if (avatarMxc) avatarMxcCache.set(avatarUrl, avatarMxc);
+    }
+
+    profileSyncQueue = profileSyncQueue
+      .then(async () => {
+        if (displayName && displayName !== lastProfileName) {
+          try {
+            await matrix.setDisplayName(displayName);
+            lastProfileName = displayName;
+          } catch (err: any) {
+            const msg = err?.message ? String(err.message) : String(err);
+            // eslint-disable-next-line no-console
+            console.error(`[bridge] Failed to set Matrix display name to "${displayName}". Error: ${msg}`);
+          }
+        }
+        if (avatarMxc && avatarMxc !== lastProfileAvatarMxc) {
+          try {
+            await matrix.setAvatarUrl(avatarMxc);
+            lastProfileAvatarMxc = avatarMxc;
+          } catch (err: any) {
+            const msg = err?.message ? String(err.message) : String(err);
+            // eslint-disable-next-line no-console
+            console.error(`[bridge] Failed to set Matrix avatar for "${displayName}". Error: ${msg}`);
+          }
+        }
+        return matrix.sendMessage(roomId, eventContent);
+      })
+      .catch((err: any) => {
+        const msg = err?.message ? String(err.message) : String(err);
+        // eslint-disable-next-line no-console
+        console.error(`[bridge] Failed to send Discord->Matrix message. Error: ${msg}`);
+        return "";
+      });
+
+    return profileSyncQueue;
+  }
+
   // Discord -> Matrix
   discord.on(Events.MessageCreate, async (message: Message) => {
     const mapping = mappingForDiscordChannel(mappings, message.channelId);
@@ -162,8 +244,6 @@ export async function startBridge(config: BridgeConfig, state: StateStore): Prom
 
     if (message.author.bot) return;
     if (message.webhookId && message.webhookId === mapping.webhookId) return;
-
-    const authorName = message.member?.displayName ?? message.author.username;
 
     const attachmentUrls = Array.from(message.attachments.values()).map((a) => a.url);
     const content = [message.cleanContent, ...attachmentUrls].filter(Boolean).join("\n");
@@ -176,8 +256,8 @@ export async function startBridge(config: BridgeConfig, state: StateStore): Prom
       if (referencedMatrixEventId) {
         try {
           const originalEvent = await matrix.getEvent(mapping.matrixRoomId, referencedMatrixEventId);
-          const plain = `${authorName}: ${content}`;
-          const html = `<strong>${escapeHtml(authorName)}</strong>: ${escapeHtml(content).replaceAll("\n", "<br/>")}`;
+          const plain = content;
+          const html = escapeHtml(content).replaceAll("\n", "<br/>");
           toSend = RichReply.createFor(mapping.matrixRoomId, originalEvent, plain, html);
         } catch {
           // fallback below
@@ -188,14 +268,14 @@ export async function startBridge(config: BridgeConfig, state: StateStore): Prom
     if (!toSend) {
       toSend = {
         msgtype: "m.text",
-        body: `${authorName}: ${content}`,
+        body: content,
         format: "org.matrix.custom.html",
-        formatted_body: `<strong>${escapeHtml(authorName)}</strong>: ${escapeHtml(content).replaceAll("\n", "<br/>")}`,
+        formatted_body: escapeHtml(content).replaceAll("\n", "<br/>"),
       };
     }
 
-    const matrixEventId = await matrix.sendMessage(mapping.matrixRoomId, toSend);
-    await state.setDiscordMatrixMessage(message.id, matrixEventId);
+    const matrixEventId = await sendAsDiscordUser(mapping.matrixRoomId, toSend, message.author, message.member);
+    if (matrixEventId) await state.setDiscordMatrixMessage(message.id, matrixEventId);
   });
 
   // Discord edits -> Matrix edits
@@ -219,27 +299,31 @@ export async function startBridge(config: BridgeConfig, state: StateStore): Prom
     const originalMatrixEventId = state.getMatrixEventIdForDiscordMessage(msg.id);
     if (!originalMatrixEventId) return;
 
-    const authorName = msg.member?.displayName ?? msg.author.username;
     const content = msg.cleanContent;
 
     const newContent = {
       msgtype: "m.text",
-      body: `${authorName}: ${content}`,
+      body: content,
       format: "org.matrix.custom.html",
-      formatted_body: `<strong>${escapeHtml(authorName)}</strong>: ${escapeHtml(content).replaceAll("\n", "<br/>")}`,
+      formatted_body: escapeHtml(content).replaceAll("\n", "<br/>"),
     };
 
-    await matrix.sendMessage(mapping.matrixRoomId, {
-      msgtype: "m.text",
-      body: `* ${newContent.body}`,
-      format: "org.matrix.custom.html",
-      formatted_body: `* ${newContent.formatted_body}`,
-      "m.new_content": newContent,
-      "m.relates_to": {
-        rel_type: "m.replace",
-        event_id: originalMatrixEventId,
+    await sendAsDiscordUser(
+      mapping.matrixRoomId,
+      {
+        msgtype: "m.text",
+        body: `* ${newContent.body}`,
+        format: "org.matrix.custom.html",
+        formatted_body: `* ${newContent.formatted_body}`,
+        "m.new_content": newContent,
+        "m.relates_to": {
+          rel_type: "m.replace",
+          event_id: originalMatrixEventId,
+        },
       },
-    });
+      msg.author,
+      msg.member,
+    );
   });
 
   // Discord reactions -> Matrix

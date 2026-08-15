@@ -15,7 +15,7 @@
     "mappings": [
       {
         "discordChannelId": "DISCORD_CHANNEL_ID",
-        "discordWebhookUrl": "ok",
+        "discordWebhookUrl": "https://discord.com/api/webhooks/CHANNEL_ID/WEBHOOK_TOKEN",
         "matrixRoomId": "!roomid:matrix.org"
       }
     ]

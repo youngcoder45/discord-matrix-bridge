@@ -1,19 +1,37 @@
-# Discord ↔ Matrix Bridge Bot (simple)
+# Discord ↔ Matrix Bridge
 
-Bridges one (or more) Discord channels to one (or more) Matrix rooms.
+A self-hosted relay bridge that connects Discord channels to Matrix rooms in **both directions** — messages, replies, edits, and reactions all sync, and the original author's **display name + avatar** are carried across.
 
 ## Features
 
-- Discord → Matrix: forwards messages, replies (as Matrix rich replies), and reactions (unicode emoji)
-- Matrix → Discord: forwards messages via a Discord webhook (impersonates Matrix displayname/avatar), replies as quoted text (`>`), and reactions
-- Optional edit forwarding in both directions
+- **Both directions** — messages, replies, edits, and unicode-emoji reactions sync between Discord and Matrix.
+- **Original identity on Discord** — Matrix → Discord messages are posted through a channel **webhook** with the Matrix sender's display name and avatar (Discord supports per-message webhook identity, so this side is exact).
+- **Original identity on Matrix** — Discord → Matrix messages are sent by the bot account, whose display name and avatar are repointed to the Discord sender right before each message (see [limitations](#notes--limitations) for how this works).
+- **Replies** — Discord → Matrix as Matrix rich replies; Matrix → Discord as quoted text (`>`).
+- **Edits** — forwarded in both directions (toggle with `bridge.forwardEdits`).
+- **Reactions** — unicode emoji reactions mirror both ways (toggle with `bridge.forwardReactions`).
+- **Multiple mappings** — one config can bridge several `channel ↔ room` pairs.
+- **Crash-safe state** — Discord↔Matrix message/reaction ID mappings are persisted to disk, so replies/edits/reactions keep working across restarts.
+
+## How it works
+
+```
+ Discord channel  ──Discord bot──▶  Matrix room
+       ▲                                  │
+       │         ──Discord webhook──      ▼
+```
+
+- A **Discord bot** (discord.js) listens on configured channels and sends Discord messages into Matrix.
+- A **Matrix bot** (matrix-bot-sdk) syncs configured rooms (auto-joining on invite) and relays Matrix messages to Discord.
+- Matrix → Discord goes through a per-channel **Discord webhook** — that's what allows impersonating the Matrix sender's name/avatar.
+- Discord → Matrix is sent by the Matrix bot account; the bridge repoints the bot's Matrix display name + avatar to the Discord sender.
+- A JSON **state file** keeps the ID mappings that make replies, edits, and reactions match up across platforms.
 
 ## Requirements
 
-- Node.js 18+ (Node 20+ recommended)
-- A Discord server where you can add bots + create webhooks
-- A Matrix account (ideally a dedicated “bot” account)
-- An **unencrypted** Matrix room (E2EE is not supported)
+- **Node.js 18+** (uses global `fetch` and `structuredClone`; Node 20+ recommended)
+- A Discord server where you can create a **bot** and a **webhook**
+- A Matrix account (ideally a dedicated **bot** account) and an **unencrypted** Matrix room — E2EE rooms are **not** supported
 
 ## 1) Install
 
@@ -21,202 +39,166 @@ Bridges one (or more) Discord channels to one (or more) Matrix rooms.
 npm install
 ```
 
-## 2) Discord setup (create bot + invite it)
+## 2) Discord: create the bot and invite it
 
-### 2.1 Create the Discord application + bot
+1. Go to the [Discord Developer Portal](https://discord.com/developers/applications) → **New Application**.
+2. Left sidebar → **Bot** → **Add Bot**.
+3. Under **Token**, click **Reset Token** / **Copy** — this is your `discord.botToken`.
+4. In the same **Bot** page, enable **MESSAGE CONTENT INTENT** (required for the bot to read message text).
+5. **OAuth2 → URL Generator**:
+   - Scopes: ✅ **bot**
+   - Bot permissions (minimum): ✅ View Channels · ✅ Read Message History · ✅ Add Reactions
+6. Open the generated URL and add the bot to your server.
 
-1. Go to the Discord Developer Portal: https://discord.com/developers/applications
-2. Click **New Application** → give it a name.
-3. In the left sidebar: **Bot** → click **Add Bot**.
-4. Under **Token**, click **Reset Token** (or **Copy**) and save it for your `config.json`.
+## 3) Discord: create a webhook for the target channel
 
-### 2.2 Enable required intents
+Matrix → Discord messages are posted through a webhook (so they can show the Matrix sender's name + avatar).
 
-In the same **Bot** page, enable:
+1. Right-click the target channel → **Edit Channel**.
+2. **Integrations → Webhooks → New Webhook**.
+3. Copy the **Webhook URL** — this is your `discordWebhookUrl`.
 
-- **MESSAGE CONTENT INTENT** (required so the bot can read message text)
+## 4) Matrix: bot account, access token, and room
 
-Reactions usually work without special privileged intents, but you must still give the bot channel permissions (next step).
+### 4.1 Create a bot account
 
-### 2.3 Invite the bot to your server
+Create a dedicated Matrix user for the bridge (don't use your personal account's token). Log in with it in any client, e.g. [Element Web](https://app.element.io).
 
-1. In the left sidebar: **OAuth2** → **URL Generator**.
-2. Scopes:
-	 - ✅ **bot**
-3. Bot permissions (minimum recommended for this bridge):
-	 - ✅ View Channels
-	 - ✅ Read Message History
-	 - ✅ Add Reactions
+### 4.2 Get an access token (Element)
 
-Then copy/open the generated URL and add the bot to your server.
+1. Click your profile picture → **All settings** → **Help & About**.
+2. Scroll to **Advanced** → copy **Access Token**.
 
-Tip: You can also construct an invite URL like:
-
-```
-https://discord.com/api/oauth2/authorize?client_id=YOUR_APPLICATION_CLIENT_ID&scope=bot&permissions=0
-```
-
-But using the URL Generator is simpler because it calculates permissions for you.
-
-## 3) Discord setup (create a webhook for the target channel)
-
-Matrix → Discord messages are posted via a webhook (so they can show Matrix display name + avatar).
-
-1. Open your Discord server.
-2. Right-click the target channel → **Edit Channel**.
-3. Go to **Integrations** → **Webhooks** → **New Webhook**.
-4. Copy the **Webhook URL**.
-
-## 4) Matrix setup (create a bot user + access token)
-
-### 4.1 Create a Matrix bot account (recommended)
-
-Create a dedicated Matrix user for the bridge bot (recommended so you don’t use your personal account token).
-
-- Matrix clients (pick one):
-	- Element Web: https://app.element.io/
-	- Element Desktop: https://element.io/get-started
-
-Sign up on your homeserver (for example matrix.org) and log in.
-
-### 4.2 Get an access token (easy method: Element)
-
-In Element:
-
-1. Click your profile picture → **All settings**.
-2. **Help & About**.
-3. Scroll to **Advanced** → copy **Access Token**.
-
-This token goes into `matrix.accessToken` in `config.json`.
+> **Important:** the account that owns this token *is* the bot. Whatever Matrix user the token belongs to is the identity that appears in the bridged room. `matrix.botUserId` in the config is informational only.
 
 ### 4.3 Add the bot to the room
 
-The bot must be in the Matrix room you want to bridge.
+Invite the bot user to the Matrix room. The bridge **auto-joins on invite**, so it should accept on its own. The room must be **unencrypted**.
 
-- Invite the bot user to the room (Element: room → **Room info** → **People** → **Invite**).
-- This project uses auto-join on invites, so the bot should accept the invite automatically.
+### 4.4 Find the room ID
 
-Important: the room must be **unencrypted** (no E2EE), otherwise the bot won’t be able to read messages.
-
-### 4.4 Find the Matrix room ID
-
-In Element, open the room → **Room info** → **Settings** → **Advanced** and copy the **Internal room ID**.
-It looks like:
-
-```
-!someroomid:example.org
-```
+Element: open the room → **Room info** → **Settings** → **Advanced** → **Internal room ID**. It looks like `!someroomid:example.org`.
 
 ## 5) Get the Discord channel ID
 
-1. Discord **User Settings** → **Advanced** → enable **Developer Mode**.
-2. Right-click the target channel → **Copy Channel ID**.
+Discord **User Settings → Advanced** → enable **Developer Mode**, then right-click the target channel → **Copy Channel ID**.
 
-## 6) Configure the bridge
-
-Copy the example config:
+## 6) Configure
 
 ```bash
 cp config.example.json config.json
 ```
 
-Fill in values in `config.json`:
+### Config reference
 
-- `discord.botToken`: Discord bot token from the Developer Portal
-- `matrix.homeserverUrl`: your homeserver base URL (example: `https://matrix.org`)
-- `matrix.accessToken`: access token for the Matrix bot user
-- `matrix.botUserId` (optional but recommended): the Matrix bot user ID (example: `@mybot:matrix.org`)
-- `bridge.mappings[]`:
-	- `discordChannelId`: the channel ID to listen to
-	- `discordWebhookUrl`: webhook URL for that channel (Matrix → Discord)
-	- `matrixRoomId`: Matrix room ID to send to
+| Key | Required | Description |
+| --- | --- | --- |
+| `discord.botToken` | ✅ | Discord bot token (Developer Portal) |
+| `matrix.homeserverUrl` | ✅ | Homeserver base URL, e.g. `https://matrix.org` |
+| `matrix.accessToken` | ✅ | Access token for the Matrix bot user (Section 4.2) |
+| `matrix.botUserId` | optional | The bot's Matrix user ID (informational only — the token's owner is what matters) |
+| `bridge.statePath` | optional | Where ID mappings are stored (default `./data/state.json`) |
+| `bridge.matrixSyncPath` | optional | Matrix sync state for resuming (default `./data/matrix-sync.json`) |
+| `bridge.forwardReactions` | optional | Mirror unicode reactions both ways (default `true`) |
+| `bridge.forwardEdits` | optional | Mirror edits both ways (default `true`) |
+| `bridge.mappings[]` | ✅ | One or more channel ↔ room pairs |
+| `mappings[].discordChannelId` | ✅ | Discord channel ID to listen to |
+| `mappings[].discordWebhookUrl` | ✅ | Webhook URL for that channel (Matrix → Discord) |
+| `mappings[].matrixRoomId` | ✅ | Matrix room ID to bridge to |
 
 Notes:
 
-- `bridge.statePath` stores message-id mappings so replies/reactions can map across platforms.
-- `bridge.matrixSyncPath` stores Matrix sync state so the bot can resume properly.
+- Add as many `mappings[]` entries as you need — each one bridges one channel to one room.
+- You can point at a different config with `CONFIG_PATH=/path/to/config.json npm run dev` (also settable in a `.env` file — `dotenv` is loaded at startup).
+- `config.json` and `.env` are gitignored — **never commit them**.
 
-## 7) Start the bot
+## 7) Run
 
-Development mode (recommended while setting up):
+Development (recommended while setting up):
 
 ```bash
 npm run dev
 ```
 
-Production build:
+Production:
 
 ```bash
 npm run build
 npm start
 ```
 
-## 8) What replies/reactions look like
+On startup you should see two lines confirming both sides are authenticated:
 
-- Discord → Matrix replies: sent as Matrix rich replies (reply threading)
-- Matrix → Discord replies: sent as quoted text using `>`
-- Reactions: unicode emoji reactions are mirrored both ways (custom Discord emoji are not)
+```
+Discord logged in as Nova#9189
+Matrix syncing as @yourbot:matrix.org
+```
+
+## 8) What syncing looks like
+
+| | Discord → Matrix | Matrix → Discord |
+| --- | --- | --- |
+| **Sender identity** | Bot's Matrix display name + avatar repointed to the Discord sender | Webhook username + avatar = Matrix sender's display name + avatar |
+| **Message** | Only the content (no name prefix — the sender line shows it) | Only the content |
+| **Reply** | Matrix rich reply quoting the original | Quoted text using `>` |
+| **Edit** | `(edited)` via Matrix edit events | Webhook message edit |
+| **Reaction** | Unicode emoji reactions | Unicode emoji reactions (bot must have Add Reactions permission) |
+| **Attachments** | Attachment URLs appended to the message | `m.image` / `m.file` sent as a link |
 
 ## Troubleshooting
 
-- Discord messages not arriving:
-	- Ensure **MESSAGE CONTENT INTENT** is enabled for the bot in the Developer Portal.
-	- Ensure the bot has access to the channel and can read message history.
-	- Ensure `discordChannelId` matches the channel you’re testing in.
-
-- Matrix messages not arriving:
-	- Ensure the bot user is actually in the room.
-	- Ensure the room is **unencrypted**.
-	- Verify `matrix.homeserverUrl` and `matrix.accessToken`.
-
-- Matrix → Discord “impersonation” doesn’t work:
-	- Matrix → Discord uses a **webhook**; make sure `discordWebhookUrl` is the webhook URL for the channel.
-
-- Error: `Unknown Webhook` / DiscordAPIError `10015`:
-	- The webhook URL in `discordWebhookUrl` is invalid (deleted webhook or regenerated token).
-	- Create a new webhook in the target channel and replace `discordWebhookUrl` in `config.json`.
-
-- Reactions don’t mirror Matrix → Discord:
-	- The Discord bot must have permission to **Add Reactions** in that channel.
-	- Only unicode emoji reactions are supported.
+- **`M_UNKNOWN_TOKEN: Token is not active`** — the Matrix access token is invalid, expired, or truncated. Generate a fresh one (Element: Settings → **Help & About** → Access Token) and update `matrix.accessToken`.
+- **"Matrix syncing as @...:matrix.org" shows the wrong user** — that line prints the account the token belongs to. If it isn't the account you invited to the room, either invite that account or get a token for the right one (see Section 4).
+- **Discord messages never arrive in Matrix**
+  - Ensure **MESSAGE CONTENT INTENT** is enabled for the bot.
+  - Ensure the bot can view the channel and read message history.
+  - Ensure `discordChannelId` matches the channel you're testing in.
+- **Matrix messages never arrive in Discord**
+  - Ensure the bot user is actually in the room (auto-join only triggers on invite).
+  - Ensure the room is **unencrypted**.
+  - Verify `matrix.homeserverUrl` / `matrix.accessToken`.
+- **Startup fails with a webhook error (URL masked as `***`)** — the webhook URL is invalid, deleted, or its token was regenerated. Create a new webhook and update `discordWebhookUrl`.
+- **Reactions don't mirror Matrix → Discord** — the bot needs **Add Reactions** permission in that channel, and only unicode emoji reactions are supported (custom Discord emoji are not).
+- **Sender name/avatar not updating on Matrix** — check the logs for `Failed to set Matrix display name` / `Failed to set Matrix avatar`; the first message from a new user also incurs an avatar upload, so it may take a second.
 
 ## Notes / limitations
 
-- Matrix messages are sent by the Matrix bot user (Matrix has no native “webhook impersonation”). The bridge includes author info in the message formatting.
-- Custom Discord emojis are currently not mirrored to Matrix (unicode emoji reactions work).
-- E2EE rooms are not supported.
+- **Identity mirroring on Matrix is per-account, not per-message.** The bot has a single Matrix account, and Matrix clients keep one profile per user. When the profile is repointed to a new Discord sender, older messages from the bot can re-render under the new name/avatar, and the room may flicker when several people type at once. This is inherent to relay bridges on shared homeservers — true per-message identity requires an application-service (puppeting) bridge.
+- Attachments are forwarded as links/URLs, not re-uploaded media.
+- Custom Discord emoji reactions are not mirrored (unicode only).
+- E2EE (encrypted) Matrix rooms are not supported.
+- The bridge ignores its own messages to avoid loops.
 
-## How “big / better” Matrix↔Discord bridges are usually built
+## How bigger bridges are built
 
-If you’ve seen a Discord↔Matrix bridge that “feels native” (each Discord user appears as themselves in Matrix, replies/threading look correct, edits/reactions work reliably, etc.), it’s usually **not** a simple bot that posts messages.
+If you've seen a Discord↔Matrix bridge that feels native — every Discord user appears as their own Matrix account, threads/replies are perfect, media is re-uploaded — it's almost certainly a **Matrix Application Service (AS) bridge**:
 
-Most mature bridges use a **Matrix Application Service (AS)** bridge design:
+- **AS registration** on the homeserver gives the bridge a trusted, namespaced set of virtual users ("ghosts"), one per Discord user.
+- **Puppeting / virtual users** let each Discord user *be* their own Matrix account, instead of one bot account switching profiles.
+- **Real storage** (SQLite/Postgres) plus protocol-aware handling of threads, embeds, stickers, rate limits, and retries.
 
-- **Application Service registration** on the Matrix homeserver
-	- The bridge is trusted by the homeserver via an AS registration file (contains tokens + namespace rules).
-	- This lets the bridge create/“own” many virtual users on Matrix.
+Examples:
 
-- **Puppeting / virtual users**
-	- For each Discord user, the bridge creates a corresponding Matrix “ghost” user (or connects the user’s own Matrix account).
-	- That’s how messages on Matrix appear as the real Discord author instead of `Bot: Alice: hello`.
-
-- **Real state + storage**
-	- Uses a real database (SQLite/Postgres) for message ID mapping, reactions, edits, membership, and resuming after restarts.
-
-- **Protocol-aware mapping**
-	- Handles Discord mentions/roles/channels, attachments, threads, replies, embeds, stickers, edits, deletes, and rate limits.
-	- Implements backoff/retry so a single API failure doesn’t crash the bridge.
-
-Examples of popular open-source bridges (for reference):
-
-- `mautrix-discord` (Python, mature “puppeting” bridge): https://docs.mau.fi/bridges/go/discord/index.html
+- `mautrix-discord` (Python, mature puppeting bridge): https://docs.mau.fi/bridges/go/discord/index.html
 - `matrix-appservice-discord` (Node, AS bridge): https://github.com/matrix-org/matrix-appservice-discord
 
-This project is intentionally simpler: it’s a **relay bridge** (Discord bot + Matrix bot + Discord webhook). It’s easier to run, but it can’t match the UX of a full AS/puppeting bridge without a larger redesign.
+This project is intentionally a **simple relay bridge** (Discord bot + Matrix bot + Discord webhook): easy to self-host, no homeserver-side registration, but it can't match the UX of a full AS/puppeting bridge without a much larger redesign.
+
+## Project layout
+
+```
+src/
+  index.ts        # entrypoint: loads config + state, starts the bridge
+  config.ts       # zod-validated config schema (errors fast on bad config)
+  startBridge.ts  # all bridge logic (Discord + Matrix clients, handlers)
+  state.ts        # persisted Discord↔Matrix message/reaction ID mappings
+  util.ts         # helpers (HTML escaping, quoting, webhook URL parsing)
+data/             # runtime state (gitignored)
+```
 
 ## Security
 
-- Treat `config.json` like a secret (it contains tokens). Do not commit it.
-- If you accidentally leaked a token, rotate it immediately:
-	- Discord bot token: Developer Portal → Bot → Reset Token
-	- Matrix access token: depends on homeserver/client; easiest is create a new token (or new bot account) if your client doesn’t support rotation.
+- Treat `config.json` like a secret — it contains live tokens. It's gitignored; don't commit it.
+- If a token leaks, rotate it immediately:
+  - **Discord**: Developer Portal → Bot → **Reset Token**
+  - **Matrix**: generate a new access token (or a new bot account) — the old one can't be "un-leaked".
